@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF Copier</title>
+  <style>
+    :root { --bg:#0b0d10; --fg:#e7e9ea; --muted:#9aa0a6; --card:#15181c; --acc:#4e9eff; --highlight:rgba(255,221,87,.35); }
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    header{padding:12px 16px;border-bottom:1px solid #23262b;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    header h1{font-size:16px;margin:0}
+    header .btn{background:var(--acc);color:#fff;border:none;padding:8px 12px;border-radius:10px;cursor:pointer}
+    .wrap{display:grid;grid-template-columns:1fr auto 1fr;height:calc(100% - 200px)}
+    .editor{display:flex;flex-direction:column;height:100%;overflow:hidden;box-sizing:border-box}
+    textarea{flex:1;background:var(--card);color:var(--fg);border:1px solid #23262b;border-radius:12px;padding:12px;resize:none;outline:none;white-space:pre-wrap;line-height:1.5;box-sizing:border-box}
+    .controls{display:flex;gap:12px;align-items:center;padding:8px 0;color:var(--muted)}
+    .sep{width:1px;background:transparent;margin:8px 12px}
+    .pill{background:#1b1f24;border:1px solid #23262b;border-radius:999px;padding:6px 10px;display:inline-flex;gap:8px;align-items:center}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .small{font-size:12px;color:var(--muted)}
+    .stat{background:#101316;border:1px solid #23262b;border-radius:8px;padding:6px 8px;color:#c4c7c9}
+    .footer{padding:8px 16px;border-top:1px solid #23262b;color:var(--muted)}
+    input[type=number]{width:60px;background:var(--card);border:1px solid #23262b;border-radius:8px;color:var(--fg);padding:2px 6px}
+
+
+
+    /* 视觉行换行指示 gutter */
+    .with-gutter{display:grid;grid-template-columns:1fr 26px;gap:6px;align-items:stretch;height:100%}
+    .with-gutter textarea{height:100%}
+    .gutter{user-select:none;background:transparent;border:1px solid transparent;border-radius:0;color:#8b949e;padding:12px 2px;line-height:1.5;overflow:auto;text-align:center;opacity:.55;font:inherit;box-sizing:border-box}
+    .gutter .gline{display:block}
+    .gutter .mark{display:inline-block}
+
+    /* 测试结果 */
+    #testResults{white-space:pre-wrap;background:#0f1216;border:1px solid #23262b;border-radius:8px;padding:8px;color:#c4c7c9;max-height:160px;overflow:auto}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PDF Copier</h1>
+    <button id="convertBtn" class="btn">转换（Ctrl/⌘+Enter）</button>
+    <div class="row">
+      <label class="pill"><input id="mergeHyphen" type="checkbox" checked> 合并断字</label>
+      <label class="pill"><input id="keepBullets" type="checkbox" checked> 保留项目符号/编号</label>
+      <label class="pill"><input id="protectCode" type="checkbox" checked> 保护代码/表格/公式</label>
+      <label class="pill"><input id="smartCN" type="checkbox" checked> 中文智能断句</label>
+      <label class="pill"><input id="smartEN" type="checkbox" checked> 英文智能断句</label>
+      <label class="pill"><input id="keepSentenceBreaks" type="checkbox"> 保留句末换行</label>
+      <label class="pill">行宽阈值 <input id="lineWidthThreshold" type="number" value="10" min="1"></label>
+
+      <label class="pill"><input id="toggleGutter" type="checkbox" checked> 换行视觉提示 </label>
+      <button id="runTests" class="btn" style="background:#6374f3">运行测试</button>
+    </div>
+    <div class="row small">
+      <span class="stat">替换的换行：<b id="changedCnt">0</b></span>
+      <span class="stat">保留的换行：<b id="keptCnt">0</b></span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <section class="editor" style="padding:12px">
+      <div class="with-gutter" id="inputWrap">
+        <textarea id="input" placeholder="在此粘贴 PDF 文本……"></textarea>
+        <div class="gutter" id="inputGutter" aria-hidden="true"></div>
+      </div>
+    </section>
+    <div class="sep"></div>
+    <section class="editor" style="padding:12px">
+      <div class="with-gutter" id="outputWrap">
+        <textarea id="output" placeholder="转换结果可在此继续编辑"></textarea>
+        <div class="gutter" id="outputGutter" aria-hidden="true"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="footer small">
+    <div style="text-align:center;">全部在本地运行。</div>
+    <div style="height:12px;"></div>
+    <div id="testResults" aria-live="polite">测试结果将显示在这里。</div>
+  </div>
+
+<script>
+// --- 正则与常量 ---
+const P_CJK_END = /[。！？…]$/;      // 强句末（中文）
+const P_EN_END  = /[.!?…]$/;         // 强句末（英文）
+const P_BULLET  = /^\s*(?:[•·\-*–—]|\(?\d{1,3}[\).]|[a-zA-Z][\).])\s+/;
+const P_HEADER  = /^\s*(?:第[一二三四五六七八九十百千]+[章节部节篇]|Appendix|Abstract|References)\b/;
+const P_TABLE   = /\t|\s\|\s/;
+const P_CODEFENCE = /^\s*```/;
+const SOFT_HYPH = /\u00AD/g;
+
+// --- 基础工具 ---
+function normalize(s){
+  return s.replace(/\r\n?/g, "\n").replace(SOFT_HYPH, "");
+}
+function mergeHyphenJoin(prev, next){
+  if(/[\-\u2010\u2011]$/.test(prev.trim()) && /^[a-z]/.test(next.trim())){
+    return prev.replace(/[\-\u2010\u2011]\s*$/,"") + next.trimStart();
+  }
+  return null;
+}
+function isLikelyCodeBlock(line){
+  if(P_CODEFENCE.test(line)) return true;
+  if(/^\s{4,}\S/.test(line)) return true;
+  if(/[{};]$/.test(line) && line.length<120) return true;
+  return false;
+}
+
+// --- 核心判定 ---
+function shouldKeepNewline(prev, next, opts){
+  const a = prev.trimEnd();
+  const b = next.trimStart();
+
+  // 空行作为段落分隔
+  if(a === '' || b === '') return true;
+
+  // 保护性规则
+  if(P_HEADER.test(b)) return true;
+  if(opts.keepBullets && P_BULLET.test(b)) return true;
+  if(opts.protectCode && (isLikelyCodeBlock(a) || isLikelyCodeBlock(b))) return true;
+  if(opts.protectCode && (P_TABLE.test(a) || P_TABLE.test(b))) return true;
+
+  // 句末换行（仅在用户勾选时保留）
+  if (opts.keepSentenceBreaks) {
+    if (opts.smartCN && /[\u4e00-\u9fa5]/.test(a) && P_CJK_END.test(a)) return true;
+    if (opts.smartEN && /[A-Za-z]/.test(a)) {
+      if (!/\b(?:[A-Z]\.|[A-Za-z]{1,3}\.)$/.test(a) && P_EN_END.test(a)) return true;
+    }
+  }
+
+  // 下一行以小写/中文/引号/括号开头：更像同一段 → 倾向合并
+  if(/^([a-z\u4e00-\u9fa5“‘"'（(])/.test(b)) return false;
+
+  // 极短行更像标题/独立段，保留（阈值完全由用户控制）
+  if(a.length < opts.lineWidthThreshold) return true;
+
+  // 默认合并
+  return false;
+}
+
+function repair(text, opts){
+  let s = normalize(text);
+  const lines = s.split("\n");
+  let out = [];
+  let changed = 0, kept = 0;
+
+  for(let i=0;i<lines.length;i++){
+    if(i===0){ out.push(lines[i]); continue; }
+    const prev = out[out.length-1];
+    const next = lines[i];
+
+    // 优先处理断字合并
+    if(opts.mergeHyphen){
+      const joined = mergeHyphenJoin(prev, next);
+      if(joined!==null){ out[out.length-1] = joined; changed++; continue; }
+    }
+
+    // 空行：强制段落
+    if(prev.trim()==='' || next.trim()===''){
+      out.push(next); kept++; continue;
+    }
+
+    if(shouldKeepNewline(prev, next, opts)){
+      out.push(next); kept++;
+    }else{
+      // 合并：英文单词间保留空格；中文-中文不加空格
+      let glue = (/\w$/.test(prev) && /^\w/.test(next)) ? ' ' : '';
+      if(/[\u4e00-\u9fa5]$/.test(prev) && /^[\u4e00-\u9fa5]/.test(next)) glue = '';
+      out[out.length-1] = prev.replace(/\s+$/,'') + glue + next.replace(/^\s+/, '');
+      changed++;
+    }
+  }
+
+  s = out.join("\n").replace(/\n{3,}/g, "\n\n");
+  return { text: s, changed, kept };
+}
+
+
+
+// --- gutter 工具 ---
+function resolveLineHeightPxFor(el){
+  const cs = getComputedStyle(el);
+  let lh = parseFloat(cs.lineHeight);
+  if(Number.isNaN(lh)){
+    // 创建测量节点（同字体、同 line-height）
+    const probe = document.createElement('span');
+    probe.textContent = 'X';
+    probe.style.visibility = 'hidden';
+    probe.style.position = 'absolute';
+    probe.style.font = cs.font;
+    probe.style.lineHeight = cs.lineHeight;
+    document.body.appendChild(probe);
+    lh = probe.getBoundingClientRect().height;
+    probe.remove();
+  }
+  return lh;
+}
+
+// --- 视觉行换行 gutter：为每个“显示行”标注是否以 \n 结尾 ---
+function computeVisualLineIndicators(textarea){
+  // 构造镜像元素，精确模拟 textarea 的换行
+  const mirror = document.createElement('div');
+  const style = getComputedStyle(textarea);
+  mirror.style.position = 'absolute';
+  mirror.style.visibility = 'hidden';
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.wordWrap = 'break-word';
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.font = style.font; // 包含字号/行高/字体家族
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.padding = style.padding;
+  mirror.style.border = style.border;
+  mirror.style.width = textarea.clientWidth + 'px';
+  mirror.style.height = 'auto';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.top = '-100000px';
+  mirror.style.left = '-100000px';
+  document.body.appendChild(mirror);
+
+  const text = textarea.value;
+  const spans = [];
+  for(let i=0;i<text.length;i++){
+    const ch = text[i] === '\n' ? '\n' : text[i];
+    const s = document.createElement('span');
+    s.textContent = ch;
+    s.dataset.i = String(i);
+    mirror.appendChild(s);
+    spans.push(s);
+  }
+  if(text.length===0){ mirror.remove(); return {lines:[], lh:resolveLineHeightPxFor(textarea)}; }
+
+  // 遍历 rects，按 offsetTop 变化来分割“显示行”
+  const lines = []; let start = 0; let top = spans[0].offsetTop;
+  for(let i=1;i<spans.length;i++){
+    if(spans[i].offsetTop !== top){
+      const lastIdx = i-1;
+      const endedWithNewline = text[lastIdx] === '\n';
+      lines.push({start, end:lastIdx, endedWithNewline});
+      start = i; top = spans[i].offsetTop;
+    }
+  }
+  const lastIdx = spans.length-1;
+  lines.push({start, end:lastIdx, endedWithNewline: text[lastIdx] === '\n'});
+
+  const lh = resolveLineHeightPxFor(textarea);
+  mirror.remove();
+  return {lines, lh};
+}
+
+function renderGutterFor(which){
+  const ta = document.getElementById(which);
+  const gutter = document.getElementById(which+'Gutter');
+  if(!document.getElementById('toggleGutter').checked){ gutter.innerHTML=''; return; }
+  const cs = getComputedStyle(ta);
+  gutter.style.font = cs.font;
+  gutter.style.lineHeight = cs.lineHeight;
+
+  const {lines, lh} = computeVisualLineIndicators(ta);
+  const frag = document.createDocumentFragment();
+  lines.forEach(l => {
+    const div = document.createElement('div');
+    div.className = 'gline';
+    div.style.height = lh + 'px'; // 保证与文本行高度完全一致，避免累积误差
+    div.innerHTML = l.endedWithNewline ? '<span class="mark">↵</span>' : '&nbsp;';
+    frag.appendChild(div);
+  });
+  gutter.innerHTML=''; gutter.appendChild(frag);
+  gutter.scrollTop = ta.scrollTop;
+}
+
+function syncGutterScroll(which){
+  const ta = document.getElementById(which);
+  const gutter = document.getElementById(which+'Gutter');
+  gutter.scrollTop = ta.scrollTop;
+}
+
+// --- 主流程 ---
+function getOpts(){
+  return {
+    mergeHyphen: document.getElementById('mergeHyphen').checked,
+    keepBullets: document.getElementById('keepBullets').checked,
+    protectCode: document.getElementById('protectCode').checked,
+    smartCN: document.getElementById('smartCN').checked,
+    smartEN: document.getElementById('smartEN').checked,
+    keepSentenceBreaks: document.getElementById('keepSentenceBreaks').checked,
+    lineWidthThreshold: parseInt(document.getElementById('lineWidthThreshold').value, 10) || 10
+  };
+}
+function run(){
+  const opts = getOpts();
+  const input = document.getElementById('input').value;
+  const {text, changed, kept} = repair(input, opts);
+  const out = document.getElementById('output');
+  out.value = text;
+  document.getElementById('changedCnt').textContent = changed;
+  document.getElementById('keptCnt').textContent = kept;
+  if(document.getElementById('toggleGutter').checked){ renderGutterFor('input'); renderGutterFor('output'); }
+}
+
+// 绑定事件
+convertBtn.addEventListener('click', run);
+window.addEventListener('keydown', (e)=>{ if((e.ctrlKey||e.metaKey) && e.key==='Enter'){ run(); }});
+['input','output'].forEach(id=>{
+  const ta = document.getElementById(id);
+  const gutter = document.getElementById(id+'Gutter');
+  ta.addEventListener('input', ()=>{ 
+    if(document.getElementById('toggleGutter').checked) renderGutterFor(id);
+  });
+  ta.addEventListener('scroll', ()=>{ syncGutterScroll(id); });
+});
+
+document.getElementById('toggleGutter').addEventListener('change', ()=> { renderGutterFor('input'); renderGutterFor('output'); });
+window.addEventListener('resize', ()=>{ if(document.getElementById('toggleGutter').checked){ renderGutterFor('input'); renderGutterFor('output'); }});
+
+// --- 内置测试 ---
+function runBuiltInTests(){
+  const results = [];
+  const base = getOpts();
+  base.keepSentenceBreaks = false; base.lineWidthThreshold = 4; base.mergeHyphen = true; base.keepBullets = true; base.protectCode = true; base.smartCN = true; base.smartEN = true;
+
+  function t(name, input, expect){
+    const {text, changed, kept} = repair(input, base);
+    let ok = true; let notes = [];
+    if('changed' in expect){ ok = ok && (changed===expect.changed); if(!ok) notes.push(`changed=${changed}!=${expect.changed}`); }
+    if('kept' in expect){ ok = ok && (kept===expect.kept); if(!ok) notes.push(`kept=${kept}!=${expect.kept}`); }
+    if('out' in expect){ ok = ok && (text===expect.out); if(!ok) notes.push('输出不一致'); }
+    results.push(`${ok? '✅ PASS':'❌ FAIL'}  ${name}${notes.length? ' → '+notes.join(', '):''}`);
+  }
+
+  t('英文段内硬换行合并',
+    'In this work, we introduce MoR,\n a unified framework that fully leverages the potential.\n Therefore, it is applicable.',
+    {changed: 2, kept: 0}
+  );
+
+  base.keepSentenceBreaks = true;
+  t('保留句末换行（开启）',
+    'This is a line.\nThis starts a new sentence.\nAnd another one.',
+    {changed: 0}
+  );
+  base.keepSentenceBreaks = false;
+
+  t('项目符号保留',
+    '- item one\n- item two\n\nNext paragraph',
+    {out: '- item one\n- item two\n\nNext paragraph', changed: 0}
+  );
+
+  t('断字合并',
+    'word-\nwrap',
+    {out: 'wordwrap', changed: 1, kept: 0}
+  );
+
+  t('代码块保护',
+    '```\nfor(i=0;i<3;i++){}\n```\nNext',
+    {out: '```\nfor(i=0;i<3;i++){}\n```\nNext', changed: 0}
+  );
+
+  document.getElementById('testResults').innerText = results.join('\n');
+}
+
+document.getElementById('runTests').addEventListener('click', runBuiltInTests);
+</script>
+</body>
+</html>
